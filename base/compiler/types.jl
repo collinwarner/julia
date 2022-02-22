@@ -126,7 +126,6 @@ function iterate(result::MethodLookupResult, args...)
     return (match::MethodMatch, state)
 end
 getindex(result::MethodLookupResult, idx::Int) = getindex(result.matches, idx)::MethodMatch
-const MethodLookupCache = IdDict{Any, Union{Missing, MethodLookupResult}}
 
 """
     InferenceResult
@@ -281,7 +280,7 @@ struct NativeInterpreter <: AbstractInterpreter
         @assert world <= get_world_counter()
 
         return new(
-            # Initially empty caches
+            # Initially empty cache
             Vector{InferenceResult}(),
 
             # world age counter
