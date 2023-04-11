@@ -815,6 +815,7 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
         }
     }
 
+    dbgs() << "Merged: " << partitioner.merged << " num nodes: " << partitioner.nodes.size();
     SmallVector<Partition, 32> partitions(threads);
     // always get the smallest partition first
     auto pcomp = [](const Partition *p1, const Partition *p2) {
@@ -833,12 +834,14 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
         return partitioner.nodes[a].weight > partitioner.nodes[b].weight;
     });
 
+    int numroots = 0;
     // Assign the root of each partition to a partition, then assign its children to the same one
     for (unsigned idx = 0; idx < idxs.size(); ++idx) {
         auto i = idxs[idx];
         auto root = partitioner.find(i);
         assert(root == i || partitioner.nodes[root].GV == nullptr);
         if (partitioner.nodes[root].GV) {
+            numroots++;
             auto &node = partitioner.nodes[root];
             auto &P = *pq.top();
             pq.pop();
@@ -869,7 +872,7 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
             node.size = partitioner.nodes[root].size;
         }
     }
-
+    dbgs() << "numroots: " << numroots;
     bool verified = verify_partitioning(partitions, M, fvars.size(), gvars.size());
     assert(verified && "Partitioning failed to partition globals correctly");
     (void) verified;
@@ -1325,7 +1328,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
     // Start all of the worker threads
     std::vector<std::thread> workers(threads);
     for (unsigned i = 0; i < threads; i++) {
-        workers[i] = std::thread([&, i](){
+        //workers[i] = std::thread([&, i](){
             LLVMContext ctx;
             // Lazily deserialize the entire module
             timers[i].deserialize.startTimer();
@@ -1356,12 +1359,12 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
                             objstart ? objstart + i : nullptr,
                             asmstart ? asmstart + i : nullptr,
                             timers[i], i);
-        });
+        //});
     }
 
     // Wait for all of the worker threads to finish
-    for (auto &w : workers)
-        w.join();
+    //for (auto &w : workers)
+    //    w.join();
 
     output_timer.stopTimer();
 
