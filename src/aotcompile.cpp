@@ -762,8 +762,10 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
         std::vector<Node> nodes;
         DenseMap<GlobalValue *, unsigned> node_map;
         unsigned merged;
+        unsigned numroots;
 
         unsigned make(GlobalValue *GV, size_t weight) {
+            numroots++;
             unsigned idx = nodes.size();
             nodes.push_back({GV, idx, 1, weight});
             node_map[GV] = idx;
@@ -788,6 +790,7 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
             nodes[y].parent = x;
             nodes[x].size += nodes[y].size;
             nodes[x].weight += nodes[y].weight;
+            numroots-=nodes[y].size;
             merged++;
             return x;
         }
@@ -815,36 +818,37 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
         }
     }
 
-    dbgs() << "Merged: " << partitioner.merged << " num nodes: " << partitioner.nodes.size();
-    SmallVector<Partition, 32> partitions(threads);
+    //dbgs() << "Merged: " << partitioner.merged << " num nodes: " << partitioner.nodes.size() << "\n";
+    dbgs() << "Calced num nodes: " << partitioner.numroots << "\n";
+    SmallVector<Partition, 32> partitions(partitioner.numroots);
     // always get the smallest partition first
-    auto pcomp = [](const Partition *p1, const Partition *p2) {
-        return p1->weight > p2->weight;
-    };
-    std::priority_queue<Partition *, std::vector<Partition *>, decltype(pcomp)> pq(pcomp);
-    for (unsigned i = 0; i < threads; ++i) {
-        pq.push(&partitions[i]);
-    }
+    //auto pcomp = [](const Partition *p1, const Partition *p2) {
+    //    return p1->weight > p2->weight;
+    //};
+    //std::priority_queue<Partition *, std::vector<Partition *>, decltype(pcomp)> pq(pcomp);
+    //for (unsigned i = 0; i < threads; ++i) {
+    //    pq.push(&partitions[i]);
+    // }
 
     std::vector<unsigned> idxs(partitioner.nodes.size());
     std::iota(idxs.begin(), idxs.end(), 0);
-    std::sort(idxs.begin(), idxs.end(), [&](unsigned a, unsigned b) {
+    //std::sort(idxs.begin(), idxs.end(), [&](unsigned a, unsigned b) {
         //because roots have more weight than their children,
         //we can sort by weight and get the roots first
-        return partitioner.nodes[a].weight > partitioner.nodes[b].weight;
-    });
+    //    return partitioner.nodes[a].weight > partitioner.nodes[b].weight;
+    //});
 
-    int numroots = 0;
+    int numrootsseen = 0;
     // Assign the root of each partition to a partition, then assign its children to the same one
     for (unsigned idx = 0; idx < idxs.size(); ++idx) {
         auto i = idxs[idx];
         auto root = partitioner.find(i);
         assert(root == i || partitioner.nodes[root].GV == nullptr);
         if (partitioner.nodes[root].GV) {
-            numroots++;
             auto &node = partitioner.nodes[root];
-            auto &P = *pq.top();
-            pq.pop();
+            auto &P = partitions[numrootsseen];//pq.top();
+            numrootsseen++;
+            //pq.pop();
             auto name = node.GV->getName();
             P.globals.insert(name);
             if (fvars.count(node.GV))
@@ -854,14 +858,14 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
             P.weight += node.weight;
             node.GV = nullptr;
             node.size = &P - partitions.data();
-            pq.push(&P);
+            //pq.push(&P);
         }
         if (root != i) {
             auto &node = partitioner.nodes[i];
             assert(node.GV != nullptr);
             // we assigned its root already, so just add it to the root's partition
             // don't touch the priority queue, since we're not changing the weight
-            auto &P = partitions[partitioner.nodes[root].size];
+            auto &P = partitions[root];
             auto name = node.GV->getName();
             P.globals.insert(name);
             if (fvars.count(node.GV))
@@ -872,7 +876,7 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
             node.size = partitioner.nodes[root].size;
         }
     }
-    dbgs() << "numroots: " << numroots;
+    dbgs() << "numroots: " << numrootsseen << "\n";
     bool verified = verify_partitioning(partitions, M, fvars.size(), gvars.size());
     assert(verified && "Partitioning failed to partition globals correctly");
     (void) verified;
@@ -1312,6 +1316,15 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
         }
     }
     auto partitions = partitionModule(M, threads);
+    outputs.resize(outputs.size() + outcount * partitions.size() * 2);
+    names_start = outputs.data() + outputs.size() - outcount * partitions.size() * 2;
+    outputs_start = names_start + outcount * partitions.size();
+    unopt.resize(unopt.size() + unopt_out * partitions.size());
+    opt.resize(opt.size() + opt_out * partitions.size());
+    obj.resize(obj.size() + obj_out * partitions.size());
+    asm_.resize(asm_.size() + asm_out * partitions.size());
+
+    //timers.resize(partitions.size());
     partition_timer.stopTimer();
 
     serialize_timer.startTimer();
@@ -1320,26 +1333,83 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
 
     output_timer.startTimer();
 
-    auto unoptstart = unopt_out ? unopt.data() + unopt.size() - threads : nullptr;
-    auto optstart = opt_out ? opt.data() + opt.size() - threads : nullptr;
-    auto objstart = obj_out ? obj.data() + obj.size() - threads : nullptr;
-    auto asmstart = asm_out ? asm_.data() + asm_.size() - threads : nullptr;
+    auto unoptstart = unopt_out ? unopt.data() + unopt.size() - partitions.size(): nullptr;
+    auto optstart = opt_out ? opt.data() + opt.size() - partitions.size(): nullptr;
+    auto objstart = obj_out ? obj.data() + obj.size() - partitions.size(): nullptr;
+    auto asmstart = asm_out ? asm_.data() + asm_.size() - partitions.size(): nullptr;
 
     // Start all of the worker threads
     std::vector<std::thread> workers(threads);
+
+    std::atomic<unsigned> current_partition(0);
+    // worker pool
+    dbgs() << "Num Partitions: [" << partitions.size() << "]\n";
+    // probably want to start biggest first to minimize contension
     for (unsigned i = 0; i < threads; i++) {
-        //workers[i] = std::thread([&, i](){
+        dbgs() << "Thread: " << i << "\n";
+        workers[i] = std::thread([&, i](){
+            // atomic increment and check
+            auto partition_index = current_partition++;
+            while (partition_index < partitions.size()) {
+            if (partition_index % 1000 == 0) {
+                dbgs() << "Partition: " << partition_index << "\n";
+            }
             LLVMContext ctx;
             // Lazily deserialize the entire module
-            timers[i].deserialize.startTimer();
+            //timers[i].deserialize.startTimer();
             auto M = cantFail(getLazyBitcodeModule(MemoryBufferRef(StringRef(serialized.data(), serialized.size()), "Optimized"), ctx), "Error loading module");
-            timers[i].deserialize.stopTimer();
+            //timers[i].deserialize.stopTimer();
 
-            timers[i].materialize.startTimer();
+            //timers[i].materialize.startTimer();
+            // need lock (with cactus tree no)
+            // need this to be an atomic increment and then we are good everything else will follow
+            materializePreserved(*M, partitions[partition_index]);
+            //timers[i].materialize.stopTimer();
+
+            //timers[i].construct.startTimer();
+            construct_vars(*M, partitions[partition_index]);
+            M->setModuleFlag(Module::Error, "julia.mv.suffix", MDString::get(M->getContext(), "_" + std::to_string(i)));
+            // The DICompileUnit file is not used for anything, but ld64 requires it be a unique string per object file
+            // or it may skip emitting debug info for that file. Here set it to ./julia#N
+            DIFile *topfile = DIFile::get(M->getContext(), "julia#" + std::to_string(i), ".");
+            for (DICompileUnit *CU : M->debug_compile_units())
+                CU->replaceOperandWith(0, topfile);
+            //timers[i].construct.stopTimer();
+
+            //timers[i].deletion.startTimer();
+            dropUnusedDeclarations(*M);
+            //timers[i].deletion.stopTimer();
+
+            add_output_impl(*M, TM,
+                            outputs_start + partition_index * outcount,
+                            names_start + partition_index * outcount,
+                            unoptstart ? unoptstart + partition_index : nullptr,
+                            optstart ? optstart + partition_index : nullptr,
+                            objstart ? objstart + partition_index : nullptr,
+                            asmstart ? asmstart + partition_index : nullptr,
+                            timers[i], partition_index);
+
+            partition_index = current_partition++;
+        }
+        dbgs() << "finished thread: " << i << "\n";
+        // next atomic increment
+        }
+        );
+    }
+    /*for (unsigned i = 0; i < partitions.size(); i++) {
+        dbgs() << "Node: " << i << "\n";
+        ///workers[i] = std::thread([&, i](){
+            LLVMContext ctx;
+            // Lazily deserialize the entire module
+            //timers[i].deserialize.startTimer();
+            auto M = cantFail(getLazyBitcodeModule(MemoryBufferRef(StringRef(serialized.data(), serialized.size()), "Optimized"), ctx), "Error loading module");
+            //timers[i].deserialize.stopTimer();
+
+            //timers[i].materialize.startTimer();
             materializePreserved(*M, partitions[i]);
-            timers[i].materialize.stopTimer();
+            //timers[i].materialize.stopTimer();
 
-            timers[i].construct.startTimer();
+            //timers[i].construct.startTimer();
             construct_vars(*M, partitions[i]);
             M->setModuleFlag(Module::Error, "julia.mv.suffix", MDString::get(M->getContext(), "_" + std::to_string(i)));
             // The DICompileUnit file is not used for anything, but ld64 requires it be a unique string per object file
@@ -1347,28 +1417,29 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
             DIFile *topfile = DIFile::get(M->getContext(), "julia#" + std::to_string(i), ".");
             for (DICompileUnit *CU : M->debug_compile_units())
                 CU->replaceOperandWith(0, topfile);
-            timers[i].construct.stopTimer();
+            //timers[i].construct.stopTimer();
 
-            timers[i].deletion.startTimer();
+            //timers[i].deletion.startTimer();
             dropUnusedDeclarations(*M);
-            timers[i].deletion.stopTimer();
+            //timers[i].deletion.stopTimer();
 
             add_output_impl(*M, TM, outputs_start + i * outcount, names_start + i * outcount,
                             unoptstart ? unoptstart + i : nullptr,
                             optstart ? optstart + i : nullptr,
                             objstart ? objstart + i : nullptr,
                             asmstart ? asmstart + i : nullptr,
-                            timers[i], i);
+                            timers[0], i);
         //});
-    }
+    }*/
 
     // Wait for all of the worker threads to finish
-    //for (auto &w : workers)
-    //    w.join();
+    for (auto &w : workers)
+        w.join();
 
     output_timer.stopTimer();
-
-    if (!report_timings) {
+    dbgs() << "all threads finished()";
+    //timer_group.clear();
+    /*if (!report_timings) {
         timer_group.clear();
     } else {
         timer_group.print(dbgs(), true);
@@ -1385,7 +1456,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
             dbgs() << p.weight;
         }
         dbgs() << "]\n";
-    }
+    }*/
 }
 
 static unsigned compute_image_thread_count(const ModuleInfo &info) {
